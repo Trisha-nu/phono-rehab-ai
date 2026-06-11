@@ -119,11 +119,12 @@ async def analyze_audio(
             )
 
         print("Distance =", distance)
-
+        print("Frames:", len(ref_mfcc.T))
+        print("Normalized:", distance / len(ref_mfcc.T))
         # Better scoring
         normalized_distance = distance / len(ref_mfcc.T)
 
-        score = 100 - normalized_distance
+        score = 100 / (1 + normalized_distance / 50)
 
         score = max(0, min(100, score))
 
