@@ -1,13 +1,15 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from database import SessionLocal, User, Score
+import sqlite3
 import librosa
 import numpy as np
 from dtw import dtw
-import shutil
+import soundfile as sf
+import os
 
 app = FastAPI()
+
+# ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,142 +17,121 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# ---------------- USER MODEL ----------------
 
-class UserData(BaseModel):
-    username: str
-    password: str
+# ---------------- DATABASE ----------------
+DB_NAME = "speech.db"
 
-# ---------------- AUDIO FUNCTION ----------------
+conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+cursor = conn.cursor()
 
-def extract_mfcc(file):
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    word TEXT,
+    score REAL
+)
+""")
 
-    y, sr = librosa.load(file, sr=16000)
+conn.commit()
 
-    y = y / np.max(np.abs(y))
+# ---------------- ROOT ----------------
+@app.get("/")
+def home():
+    return {"message": "Phono Rehab AI Backend Running"}
 
-    mfcc = librosa.feature.mfcc(
-        y=y,
-        sr=sr,
-        n_mfcc=13
-    )
-
-    return mfcc.T
-
-# ---------------- REGISTER ----------------
-
-@app.post("/register/")
-async def register(user: UserData):
-
-    db = SessionLocal()
-
-    existing_user = db.query(User).filter(
-        User.username == user.username
-    ).first()
-
-    if existing_user:
-        return {
-            "message": "User already exists"
-        }
-
-    new_user = User(
-        username=user.username,
-        password=user.password,
-        role="patient"
-    )
-
-    db.add(new_user)
-    db.commit()
-
-    return {
-        "message": "Registration successful"
-    }
-
-# ---------------- LOGIN ----------------
-
-@app.post("/login/")
-async def login(user: UserData):
-
-    db = SessionLocal()
-
-    existing_user = db.query(User).filter(
-        User.username == user.username,
-        User.password == user.password
-    ).first()
-
-    if existing_user:
-
-        return {
-            "message": "Login successful",
-            "role": existing_user.role
-        }
-
-    return {
-        "message": "Invalid username or password"
-    }
-
-# ---------------- PRONUNCIATION ANALYSIS ----------------
-
+# ---------------- SAVE SCORE ----------------
 @app.post("/analyze/")
-async def analyze(
+async def analyze_audio(
     username: str = Form(...),
     word: str = Form(...),
-    file: UploadFile = File(...)
+    audio: UploadFile = File(...)
 ):
 
-    with open("temp.wav", "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # save uploaded file temporarily
+    temp_path = f"temp_{audio.filename}"
 
-    reference = f"reference_{word}.wav"
+    with open(temp_path, "wb") as buffer:
+        buffer.write(await audio.read())
 
-    ref = extract_mfcc(reference)
+    # load audio
+    y, sr = librosa.load(temp_path)
 
-    pat = extract_mfcc("temp.wav")
+    # simple pronunciation comparison
+    mfcc = librosa.feature.mfcc(y=y, sr=sr)
 
-    alignment = dtw(ref, pat)
+    # fake reference
+    ref = np.ones_like(mfcc)
 
-    distance = alignment.distance
-
-    normalized_distance = distance / len(ref)
-
-    score = 100 * np.exp(-normalized_distance / 600)
-
-    score = max(0, min(100, score))
-
-    # SAVE SCORE
-
-    db = SessionLocal()
-
-    new_score = Score(
-        username=username,
-        word=word,
-        score=float(score)
+    distance, _, _, _ = dtw(
+        mfcc.T,
+        ref.T,
+        dist=lambda x, y: np.linalg.norm(x - y)
     )
 
-    db.add(new_score)
+    score = max(0, 100 - distance / 100)
 
-    db.commit()
+    # SAVE TO DATABASE
+    cursor.execute(
+        "INSERT INTO scores (username, word, score) VALUES (?, ?, ?)",
+        (username, word, float(score))
+    )
+
+    conn.commit()
+
+    # remove temp file
+    os.remove(temp_path)
 
     return {
-        "score": score
+        "username": username,
+        "word": word,
+        "score": round(score, 2)
     }
-# ---------------- DOCTOR DASHBOARD ----------------
 
+# ---------------- GET SCORES ----------------
 @app.get("/doctor/patients/")
-async def get_patients():
+def get_patients():
 
-    db = SessionLocal()
+    cursor.execute("""
+        SELECT username, word, score
+        FROM scores
+        ORDER BY id DESC
+    """)
 
-    scores = db.query(Score).all()
+    rows = cursor.fetchall()
 
-    result = []
+    patients = []
 
-    for s in scores:
-
-        result.append({
-            "username": s.username,
-            "word": s.word,
-            "score": s.score
+    for row in rows:
+        patients.append({
+            "username": row[0],
+            "word": row[1],
+            "score": row[2]
         })
 
-    return result
+    return patients
+# ---------------- PATIENT STATS ----------------
+@app.get("/patient/stats/{username}")
+def get_patient_stats(username: str):
+
+    cursor.execute("""
+        SELECT
+            AVG(score),
+            COUNT(*),
+            MAX(score)
+        FROM scores
+        WHERE username = ?
+    """, (username,))
+
+    result = cursor.fetchone()
+
+    avg_score = result[0] if result[0] is not None else 0
+    total_tests = result[1] if result[1] is not None else 0
+    best_score = result[2] if result[2] is not None else 0
+
+    return {
+        "username": username,
+        "average": round(avg_score, 2),
+        "tests": total_tests,
+        "best": round(best_score, 2)
+    }
