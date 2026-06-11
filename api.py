@@ -60,7 +60,7 @@ async def analyze_audio(
             buffer.write(await audio.read())
 
         # Load patient audio
-        patient_audio, sr = librosa.load(temp_path, sr=None)
+        patient_audio, sr = librosa.load(temp_path, sr=16000)
 
         patient_mfcc = librosa.feature.mfcc(
             y=patient_audio,
@@ -69,11 +69,16 @@ async def analyze_audio(
         )
 
         # Reference file
-        ref_path = f"reference_{word.lower()}.wav"
+        ref_path = f"reference_{word.strip().lower()}.wav"
+
+        print("Requested word:", word)
+        print("Looking for:", ref_path)
+        print("Exists:", os.path.exists(ref_path))
 
         if not os.path.exists(ref_path):
 
-            os.remove(temp_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
             return {
                 "username": username,
@@ -83,7 +88,7 @@ async def analyze_audio(
             }
 
         # Load reference audio
-        ref_audio, ref_sr = librosa.load(ref_path, sr=None)
+        ref_audio, ref_sr = librosa.load(ref_path, sr=16000)
 
         ref_mfcc = librosa.feature.mfcc(
             y=ref_audio,
@@ -113,16 +118,17 @@ async def analyze_audio(
                 - np.mean(ref_mfcc, axis=1)
             )
 
-        # Convert distance into score
-        score = 100 - (distance / 5)
+        print("Distance =", distance)
+
+        # Better scoring
+        normalized_distance = distance / len(ref_mfcc.T)
+
+        score = 100 - normalized_distance
 
         score = max(0, min(100, score))
 
-        print("Username:", username)
-        print("Word:", word)
-        print("Reference:", ref_path)
-        print("Distance:", distance)
-        print("Score:", score)
+        print("Normalized Distance =", normalized_distance)
+        print("Final Score =", score)
 
         # Save score
         cursor.execute(
@@ -135,7 +141,6 @@ async def analyze_audio(
 
         conn.commit()
 
-        # Remove temp file
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
