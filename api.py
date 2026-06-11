@@ -60,14 +60,15 @@ async def analyze_audio(
     # simple pronunciation comparison
     mfcc = librosa.feature.mfcc(y=y, sr=sr)
 
-    # fake reference
+    # reference (temporary simple baseline)
     ref = np.ones_like(mfcc)
 
-    from dtw import dtw
-    ref = np.ones_like(mfcc)
+    # DTW distance
     distance = dtw(mfcc.T, ref.T).distance
 
-    score = max(0, 100 - distance / 100)
+    # friendly scoring (smooth, non-zero, forgiving)
+    score = 100 * np.exp(-distance / 200)
+    score = min(100, max(0, score))
 
     # SAVE TO DATABASE
     cursor.execute(
