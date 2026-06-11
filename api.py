@@ -4,12 +4,12 @@ import sqlite3
 import librosa
 import numpy as np
 from dtw import dtw
-import soundfile as sf
 import os
 
 app = FastAPI()
 
 # ---------------- CORS ----------------
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,6 +19,7 @@ app.add_middleware(
 )
 
 # ---------------- DATABASE ----------------
+
 DB_NAME = "speech.db"
 
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -36,11 +37,13 @@ CREATE TABLE IF NOT EXISTS scores (
 conn.commit()
 
 # ---------------- ROOT ----------------
+
 @app.get("/")
 def home():
     return {"message": "Phono Rehab AI Backend Running"}
 
-# ---------------- SAVE SCORE ----------------
+# ---------------- ANALYZE AUDIO ----------------
+
 @app.post("/analyze/")
 async def analyze_audio(
     username: str = Form(...),
@@ -48,46 +51,113 @@ async def analyze_audio(
     audio: UploadFile = File(...)
 ):
 
-    # save uploaded file temporarily
-    temp_path = f"temp_{audio.filename}"
+    try:
 
-    with open(temp_path, "wb") as buffer:
-        buffer.write(await audio.read())
+        # Save uploaded audio
+        temp_path = f"temp_{audio.filename}"
 
-    # load audio
-    y, sr = librosa.load(temp_path)
+        with open(temp_path, "wb") as buffer:
+            buffer.write(await audio.read())
 
-    # simple pronunciation comparison
-    mfcc = librosa.feature.mfcc(y=y, sr=sr)
+        # Load patient audio
+        patient_audio, sr = librosa.load(temp_path, sr=None)
 
-    # reference (temporary simple baseline)
-    ref = np.ones_like(mfcc)
+        patient_mfcc = librosa.feature.mfcc(
+            y=patient_audio,
+            sr=sr,
+            n_mfcc=13
+        )
 
-    # DTW distance
-    distance = dtw(mfcc.T, ref.T).distance
+        # Reference file
+        ref_path = f"reference_{word.lower()}.wav"
 
-    # friendly scoring (smooth, non-zero, forgiving)
-    score = 100 * np.exp(-distance / 200)
-    score = min(100, max(0, score))
+        if not os.path.exists(ref_path):
 
-    # SAVE TO DATABASE
-    cursor.execute(
-        "INSERT INTO scores (username, word, score) VALUES (?, ?, ?)",
-        (username, word, float(score))
-    )
+            os.remove(temp_path)
 
-    conn.commit()
+            return {
+                "username": username,
+                "word": word,
+                "score": 0,
+                "error": f"Reference file not found: {ref_path}"
+            }
 
-    # remove temp file
-    os.remove(temp_path)
+        # Load reference audio
+        ref_audio, ref_sr = librosa.load(ref_path, sr=None)
 
-    return {
-        "username": username,
-        "word": word,
-        "score": round(score, 2)
-    }
+        ref_mfcc = librosa.feature.mfcc(
+            y=ref_audio,
+            sr=ref_sr,
+            n_mfcc=13
+        )
 
-# ---------------- GET SCORES ----------------
+        # DTW comparison
+        try:
+
+            alignment = dtw(patient_mfcc.T, ref_mfcc.T)
+
+            if hasattr(alignment, "distance"):
+                distance = alignment.distance
+            else:
+                distance = np.linalg.norm(
+                    np.mean(patient_mfcc, axis=1)
+                    - np.mean(ref_mfcc, axis=1)
+                )
+
+        except Exception as e:
+
+            print("DTW Error:", e)
+
+            distance = np.linalg.norm(
+                np.mean(patient_mfcc, axis=1)
+                - np.mean(ref_mfcc, axis=1)
+            )
+
+        # Convert distance into score
+        score = 100 - (distance / 5)
+
+        score = max(0, min(100, score))
+
+        print("Username:", username)
+        print("Word:", word)
+        print("Reference:", ref_path)
+        print("Distance:", distance)
+        print("Score:", score)
+
+        # Save score
+        cursor.execute(
+            """
+            INSERT INTO scores(username, word, score)
+            VALUES (?, ?, ?)
+            """,
+            (username, word, float(score))
+        )
+
+        conn.commit()
+
+        # Remove temp file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        return {
+            "username": username,
+            "word": word,
+            "score": round(score, 2)
+        }
+
+    except Exception as e:
+
+        print("Analyze Error:", str(e))
+
+        return {
+            "username": username,
+            "word": word,
+            "score": 0,
+            "error": str(e)
+        }
+
+# ---------------- DOCTOR VIEW ----------------
+
 @app.get("/doctor/patients/")
 def get_patients():
 
@@ -109,7 +179,9 @@ def get_patients():
         })
 
     return patients
+
 # ---------------- PATIENT STATS ----------------
+
 @app.get("/patient/stats/{username}")
 def get_patient_stats(username: str):
 
