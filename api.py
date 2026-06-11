@@ -63,11 +63,9 @@ async def analyze_audio(
     # fake reference
     ref = np.ones_like(mfcc)
 
-    distance, _, _, _ = dtw(
-        mfcc.T,
-        ref.T,
-        dist=lambda x, y: np.linalg.norm(x - y)
-    )
+    from dtw import dtw
+    ref = np.ones_like(mfcc)
+    distance = dtw(mfcc.T, ref.T).distance
 
     score = max(0, 100 - distance / 100)
 
