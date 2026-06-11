@@ -124,7 +124,7 @@ async def analyze_audio(
         # Better scoring
         normalized_distance = distance / len(ref_mfcc.T)
 
-        score = 100 / (1 + normalized_distance / 50)
+        score = 100 / (1 + normalized_distance / 600)
 
         score = max(0, min(100, score))
 
